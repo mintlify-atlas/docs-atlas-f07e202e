@@ -1,0 +1,46 @@
+---
+title: 'Removing the vector-config operator from the cluster'
+description: 'How to cleanly undeploy the vector-config controller manager and remove all associated RBAC resources from your Kubernetes cluster using Kustomize.'
+---
+
+Removing vector-config means undeploying the controller manager and all associated RBAC resources created by `make deploy`. vector-config does not install custom resource definitions (CRDs), so there are no custom resource instances to worry about cleaning up.
+
+<Steps>
+  <Step title="Undeploy the controller manager">
+    Remove the Deployment, ServiceAccount, and RBAC resources created by `make deploy`:
+
+    ```bash
+    make undeploy
+    ```
+
+    This runs:
+
+    ```bash
+    kustomize build config/default | kubectl delete --ignore-not-found=false -f -
+    ```
+
+    To suppress errors when resources are already absent (for example in a CI cleanup job), pass the `ignore-not-found` flag:
+
+    ```bash
+    make undeploy ignore-not-found=true
+    ```
+
+    Verify the controller pod is gone:
+
+    ```bash
+    kubectl get pods -n vector-config-system
+    ```
+  </Step>
+</Steps>
+
+## Equivalent raw command
+
+If you do not have the repository checked out, you can run the equivalent operation directly with `kustomize` and `kubectl`:
+
+```bash
+kustomize build config/default | kubectl delete --ignore-not-found=true -f -
+```
+
+<Note>
+  The raw command above uses `--ignore-not-found=true` so it is safe to run even if some resources were already removed manually. The `make undeploy` target defaults to `ignore-not-found=false`, which causes it to exit with an error if a resource is missing — this is intentional to surface unexpected state in automated pipelines.
+</Note>

@@ -1,0 +1,50 @@
+---
+title: "vector-config: Kubernetes operator for Vector pipelines"
+description: "vector-config watches labeled Kubernetes Secrets and writes their data as Vector pipeline config files to disk, enabling declarative config management without pod restarts."
+---
+
+vector-config is a lightweight Kubernetes operator built on controller-runtime that watches Kubernetes Secrets carrying specific labels and writes their data as configuration files to disk. It bridges Kubernetes-native secret management with the [Vector](https://vector.dev) observability pipeline, letting you manage Vector's configuration declaratively through the Kubernetes API.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Deploy the operator and ship your first Vector config in minutes
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    Understand how the operator watches, reconciles, and writes configs
+  </Card>
+  <Card title="Secret labels" icon="tag" href="/concepts/secret-labels">
+    Reference for all labels that control operator behavior
+  </Card>
+  <Card title="Deployment guide" icon="server" href="/deployment/install">
+    Install the operator into your Kubernetes cluster with Kustomize
+  </Card>
+</CardGroup>
+
+## How it works
+
+vector-config runs as a standard Kubernetes controller inside your cluster. It watches `Secret` resources in a configured namespace and, when it detects a Secret with the right labels, writes the secret's data entries as files into a local directory that Vector reads for configuration.
+
+<Steps>
+  <Step title="Label your Secrets">
+    Add `logging.whizard.io/vector-role` and `logging.whizard.io/enable: "true"` labels to any Secret containing Vector configuration YAML.
+  </Step>
+  <Step title="Operator reconciles">
+    The operator detects the labeled Secret, clears any stale config files, and writes the new configuration data to `/etc/vector/custom` (or a custom path you specify).
+  </Step>
+  <Step title="Vector picks up the config">
+    Vector reads the written files from its config directory and applies the updated pipeline configuration — no operator restarts needed.
+  </Step>
+</Steps>
+
+## Key features
+
+- **Dual-role operation** — run as an `Agent` (per-node) or `Aggregator` (cluster-level), each watching only Secrets labeled for their role
+- **Secret-driven config** — store Vector pipeline YAML inside standard Kubernetes Secrets; no custom CRDs required
+- **TLS certificate sync** — a separate label class syncs certificate data into a dedicated `certification/` subdirectory
+- **Namespace-scoped watch** — the operator restricts its cache to a single namespace for multi-tenant isolation
+- **Leader election** — optional HA mode ensures only one active controller at a time
+- **Multi-arch images** — official images published for `amd64`, `arm64`, `s390x`, and `ppc64le`
+
+<Note>
+  vector-config does not install or manage the Vector binary itself. It manages only the configuration files that Vector reads. You are responsible for running Vector as a separate DaemonSet or Deployment and pointing it at the same directory.
+</Note>

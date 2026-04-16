@@ -1,80 +1,210 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Deploy vector-config and ship your first Vector config"
+description: "Install the vector-config operator, label a Kubernetes Secret, and verify that the operator writes Vector configuration files to disk in under ten minutes."
 ---
 
-## Get started in three steps
-
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+vector-config is a Kubernetes operator that watches labeled Secrets and writes their data as configuration files to `/etc/vector/custom` (or a path you choose). This page walks you through building and pushing the operator image, deploying it to your cluster, creating a labeled Secret, and confirming that the operator wrote the expected files — everything you need to have a working installation.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  vector-config does not install or run Vector itself. You must run Vector separately as a DaemonSet or Deployment and point it at the same directory the operator writes to.
 </Note>
+
+## Prerequisites
+
+Before you start, make sure you have:
+
+- A Kubernetes cluster with `kubectl` configured
+- Docker (or a compatible container tool) with push access to your image registry
+- `kustomize` v5.0.1 or later
+- Go 1.20 or later (only needed if you build from source)
+
+## Installation
+
+<Steps>
+  <Step title="Clone the repository">
+    Clone the vector-config source and enter the project directory.
+
+    ```bash
+    git clone https://github.com/WizTelemetry/vector-config.git
+    cd vector-config
+    ```
+  </Step>
+
+  <Step title="Build and push the operator image">
+    The `docker-build` target runs tests, then builds and pushes a multi-arch image (`linux/amd64` and `linux/arm64`) using Docker Buildx. Set the `IMG` variable to your registry path.
+
+    ```bash
+    make docker-build IMG=your-registry/vector-config:latest
+    ```
+
+    <Tip>
+      The Makefile defaults to `IMG=kubesphere/vector-config:latest`. Override it on the command line or by exporting the variable before running `make`.
+    </Tip>
+
+    If you only want a single-platform local build without running tests, you can call Docker directly:
+
+    ```bash
+    docker build -f Dockerfile -t your-registry/vector-config:latest .
+    docker push your-registry/vector-config:latest
+    ```
+  </Step>
+
+  <Step title="Deploy the operator">
+    The `deploy` target patches the manager image in `config/manager/` and applies the full `config/default/` Kustomize stack.
+
+    ```bash
+    make deploy IMG=your-registry/vector-config:latest
+    ```
+
+    The operator deploys to the `vector-config-system` namespace and by default watches Secrets in `kubesphere-logging-system`, running in `Agent` mode and writing files to `/etc/vector/custom`. See [configuring the operator](#configuring-the-operator) to change these defaults.
+
+    Confirm the operator pod is running:
+
+    ```bash
+    kubectl get pods -n vector-config-system
+    ```
+
+    ```
+    NAME                                               READY   STATUS    RESTARTS   AGE
+    vector-config-controller-manager-xxxxxxxx-xxxxx   1/1     Running   0          30s
+    ```
+  </Step>
+
+  <Step title="Create a labeled Secret">
+    The operator reconciles Secrets that carry two labels:
+
+    | Label | Required value |
+    |---|---|
+    | `logging.whizard.io/vector-role` | `Agent` or `Aggregator` (must match the operator's `--role` flag) |
+    | `logging.whizard.io/enable` | `"true"` |
+
+    Apply the sample Agent Secret from the repository:
+
+    ```bash
+    kubectl apply -f config/sample/secret2.yaml
+    ```
+
+    Or create your own Secret with a Vector configuration payload. The Secret data keys become part of the written filenames (the operator writes each key as `<secret-name>-<key>`):
+
+    ```yaml
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: agent
+      namespace: kubesphere-logging-system
+      labels:
+        logging.whizard.io/vector-role: Agent
+        logging.whizard.io/enable: "true"
+    data:
+      agent.yaml: <base64-encoded Vector config YAML>
+    ```
+
+    <Note>
+      The `logging.whizard.io/vector-role` label value must exactly match the role the operator was started with (`Agent` or `Aggregator`). Secrets with a mismatched or missing role label are ignored.
+    </Note>
+  </Step>
+
+  <Step title="Verify the operator wrote the config files">
+    After the Secret is applied, the operator reconciles immediately and writes the decoded data to disk. Each key in `secret.data` is written as a file named `<secret-name>-<key>` inside the config directory.
+
+    For the `agent` Secret with key `agent.yaml`, the operator writes:
+
+    ```
+    /etc/vector/custom/agent-agent.yaml
+    ```
+
+    Use `kubectl exec` to inspect the files inside the operator pod:
+
+    ```bash
+    kubectl exec -n vector-config-system \
+      deploy/vector-config-controller-manager -- \
+      ls /etc/vector/custom/
+    ```
+
+    You should see the generated config file listed:
+
+    ```
+    agent-agent.yaml
+    ```
+
+    To read its contents:
+
+    ```bash
+    kubectl exec -n vector-config-system \
+      deploy/vector-config-controller-manager -- \
+      cat /etc/vector/custom/agent-agent.yaml
+    ```
+
+    <Tip>
+      If the file does not appear, check the operator logs for reconciliation errors:
+
+      ```bash
+      kubectl logs -n vector-config-system deploy/vector-config-controller-manager
+      ```
+    </Tip>
+  </Step>
+</Steps>
+
+## Configuring the operator
+
+The operator binary accepts the following flags. You can set these in your Kustomize patch or Deployment spec.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--role` | `Agent` | Role to run as. Accepts `Agent` or `Aggregator`. Determines which Secrets the operator reconciles. |
+| `--namespace` | `kubesphere-logging-system` | Namespace the operator watches for labeled Secrets. |
+| `--fileDir` | _(empty, falls back to `/etc/vector/custom`)_ | Directory where config files are written. |
+| `--metrics-bind-address` | `:8082` | Address the metrics endpoint listens on. |
+| `--health-probe-bind-address` | `:8081` | Address the health probe endpoint listens on. |
+| `--leader-elect` | `false` | Enable leader election for HA deployments. |
+
+<CodeGroup>
+
+```bash Agent mode (default)
+/manager \
+  --role=Agent \
+  --namespace=kubesphere-logging-system \
+  --fileDir=/etc/vector/custom
+```
+
+```bash Aggregator mode
+/manager \
+  --role=Aggregator \
+  --namespace=kubesphere-logging-system \
+  --fileDir=/etc/vector/custom
+```
+
+</CodeGroup>
+
+<Warning>
+  If you pass an invalid value for `--role`, the operator silently falls back to `Aggregator` mode. Double-check your Deployment spec if Secrets are not being reconciled.
+</Warning>
+
+## How the operator reconciles Secrets
+
+On every reconcile loop, the operator:
+
+1. Removes all existing files under the config directory (a full replace, not a merge).
+2. Lists all Secrets in the watched namespace that match both `logging.whizard.io/vector-role: <role>` and `logging.whizard.io/enable: "true"`.
+3. Writes each Secret data entry as a file at `<fileDir>/<secret-name>-<key>`.
+4. Lists Secrets with the `logging.whizard.io/certification: "true"` label and writes their data into `<fileDir>/certification/<key>`.
+
+<Note>
+  Because the operator removes all files before writing, deleting a Secret or removing the required labels causes its config files to be cleaned up on the next reconcile.
+</Note>
+
+## Uninstalling
+
+To remove the operator and its RBAC resources from the cluster:
+
+```bash
+make undeploy
+make uninstall
+```
+
+Pass `ignore-not-found=true` if resources were already partially removed:
+
+```bash
+make undeploy ignore-not-found=true
+make uninstall ignore-not-found=true
+```

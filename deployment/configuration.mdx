@@ -1,0 +1,116 @@
+---
+title: 'Configuring the vector-config operator'
+description: 'Complete reference for all CLI flags, resource limits, liveness probes, and security settings that control the vector-config controller manager at runtime.'
+---
+
+The vector-config controller manager accepts configuration through command-line flags passed in the `args` field of its container spec. This page documents every available flag, shows you how to set them in the Deployment manifest, and covers the resource and health probe settings baked into `config/manager/manager.yaml`.
+
+## CLI flags
+
+Pass flags by editing the `args` list under the `manager` container in your Deployment, or by patching `config/manager/manager.yaml` before running `make deploy`.
+
+<ParamField path="--role" type="string" default="Agent">
+  Sets the operating mode of the controller. Accepted values are `Agent` and `Aggregator`. The controller watches for Secrets labelled for the corresponding role and writes Vector configuration files accordingly.
+
+  If you supply any value other than `Agent` or `Aggregator`, the controller silently falls back to `Aggregator`.
+</ParamField>
+
+<Warning>
+  An unrecognized `--role` value does not cause the controller to exit or log an error — it silently coerces the role to `Aggregator`. Always validate the value you pass to avoid unexpected behavior.
+</Warning>
+
+<ParamField path="--namespace" type="string" default="kubesphere-logging-system">
+  The Kubernetes namespace that the controller's cache watches for Secrets. The controller ignores resources in all other namespaces.
+</ParamField>
+
+<ParamField path="--fileDir" type="string" default="/etc/vector/custom">
+  The directory where the controller writes generated Vector configuration files. When the flag is omitted or set to an empty string, the controller falls back to the compiled-in default path `/etc/vector/custom` (defined in `internal/constants/constant.go`).
+</ParamField>
+
+<ParamField path="--leader-elect" type="boolean" default="false">
+  Enables leader election so that only one replica of the controller is active at a time. Use this when you scale the Deployment to more than one replica for high availability. The leader election ID is `66c47c3e.kubesphere.io`.
+</ParamField>
+
+<ParamField path="--metrics-bind-address" type="string" default=":8082">
+  The address and port on which the metrics endpoint listens. Set to `0` to disable metrics.
+</ParamField>
+
+<ParamField path="--health-probe-bind-address" type="string" default=":8081">
+  The address and port on which the liveness (`/healthz`) and readiness (`/readyz`) HTTP endpoints listen.
+</ParamField>
+
+## Setting flags in the Deployment manifest
+
+Edit the `args` field in `config/manager/manager.yaml` to pass flags to the manager binary:
+
+```yaml config/manager/manager.yaml (args snippet)
+containers:
+- command:
+  - /manager
+  args:
+  - --leader-elect
+  - --role=Agent
+  - --namespace=kubesphere-logging-system
+  - --fileDir=/etc/vector/custom
+  - --metrics-bind-address=:8082
+  - --health-probe-bind-address=:8081
+  name: manager
+```
+
+After editing, re-run `make deploy IMG=...` to apply the updated manifests.
+
+## Resource limits and requests
+
+The default resource budget for the `manager` container is defined in `config/manager/manager.yaml`:
+
+```yaml config/manager/manager.yaml (resources)
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+```
+
+Adjust these values based on the volume of Secrets the controller manages in your environment. The controller is lightweight under normal load; the limits are conservative defaults suitable for most single-cluster deployments.
+
+## Health probes
+
+The controller exposes HTTP health endpoints on port `8081` (the `--health-probe-bind-address` port):
+
+```yaml config/manager/manager.yaml (probes)
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8081
+  initialDelaySeconds: 15
+  periodSeconds: 20
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8081
+  initialDelaySeconds: 5
+  periodSeconds: 10
+```
+
+Kubernetes marks the pod as not ready until `/readyz` returns HTTP 200, and restarts the container if `/healthz` fails after startup.
+
+## Security context
+
+The manager container runs with a restrictive security context enforced in `config/manager/manager.yaml`:
+
+```yaml config/manager/manager.yaml (security)
+securityContext:
+  runAsNonRoot: true
+
+containers:
+- name: manager
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - "ALL"
+```
+
+The pod runs as a non-root user, privilege escalation is disabled, and all Linux capabilities are dropped. Do not relax these settings in production.

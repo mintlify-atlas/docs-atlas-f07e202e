@@ -1,0 +1,90 @@
+---
+title: 'How to install the vector-config operator'
+description: 'Step-by-step guide to building the image and deploying the vector-config controller manager to your Kubernetes cluster with Kustomize.'
+---
+
+This page walks you through the full installation of the vector-config operator: building and pushing the container image and deploying the controller manager. The process uses `make` targets that wrap `kustomize` and `kubectl`, so a single command handles each phase.
+
+<Note>
+  The Kustomize overlay in `config/default/kustomization.yaml` deploys all controller resources into the `vector-config-system` namespace with a `vector-config-` name prefix. The controller watches Secrets in a separate namespace (`kubesphere-logging-system` by default), set via the `--namespace` flag.
+</Note>
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/WizTelemetry/vector-config.git
+    cd vector-config
+    ```
+  </Step>
+
+  <Step title="Build and push the Docker image">
+    Choose the build target that matches your deployment target. Both targets run the test suite before building.
+
+    <CodeGroup>
+
+    ```bash Standard (amd64 + arm64)
+    make docker-build IMG=<your-registry>/vector-config:v0.1.0
+    ```
+
+    ```bash Extended (amd64, arm64, s390x, ppc64le)
+    make docker-buildx IMG=<your-registry>/vector-config:v0.1.0
+    ```
+
+    </CodeGroup>
+
+    Replace `<your-registry>` with your container registry hostname and repository path, for example `registry.example.com/team/vector-config:v0.1.0`.
+
+    The `docker-build` target uses `docker buildx build --push`, so the image is pushed directly to the registry after the build completes. Make sure you are logged in to your registry before running this step.
+
+    <Tip>
+      If you want to use the pre-built image, skip this step and pass `IMG=kubesphere/vector-config:latest` (the default) when running `make deploy`.
+    </Tip>
+  </Step>
+
+  <Step title="Deploy the controller manager">
+    Deploy the controller using the image you built in the previous step:
+
+    ```bash
+    make deploy IMG=<your-registry>/vector-config:v0.1.0
+    ```
+
+    This runs:
+
+    ```bash
+    cd config/manager && kustomize edit set image controller=<your-registry>/vector-config:v0.1.0
+    kustomize build config/default | kubectl apply -f -
+    ```
+
+    The command creates the `vector-config-system` namespace, the `vector-config-controller-manager` Deployment, its ServiceAccount, and all associated RBAC resources.
+  </Step>
+
+  <Step title="Verify the deployment">
+    Check that the controller pod is running in `vector-config-system`:
+
+    ```bash
+    kubectl get pods -n vector-config-system
+    ```
+
+    Expected output:
+
+    ```
+    NAME                                                   READY   STATUS    RESTARTS   AGE
+    vector-config-controller-manager-6d8f9b7c4d-xk9p2     1/1     Running   0          45s
+    ```
+
+    The pod is healthy when `READY` shows `1/1` and `STATUS` shows `Running`. Check the controller logs to confirm it started without errors:
+
+    ```bash
+    kubectl logs -n vector-config-system \
+      -l control-plane=controller-manager --tail=20
+    ```
+
+    You should see these startup log lines:
+
+    ```
+    {"level":"info","msg":"Current mode is Agent"}
+    {"level":"info","msg":"current fileDir is /etc/vector/custom"}
+    {"level":"info","msg":"starting manager"}
+    ```
+  </Step>
+</Steps>

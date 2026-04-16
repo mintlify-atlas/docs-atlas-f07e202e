@@ -1,0 +1,114 @@
+---
+title: 'Monitoring the vector-config operator'
+description: 'Check operator health using /healthz and /readyz, inspect logs for startup and reconcile activity, and review Kubernetes events for error details.'
+---
+
+The vector-config operator exposes HTTP health probes and structured log output that you can use to verify it is running correctly and reconciling Secrets as expected. This page covers the health endpoints, how to inspect logs, what healthy output looks like, and how to use Kubernetes events to track reconcile activity.
+
+## Health endpoints
+
+The operator registers two HTTP endpoints on port `8081` (controlled by the `--health-probe-bind-address` flag):
+
+| Endpoint | Purpose | Used by |
+|---|---|---|
+| `/healthz` | Liveness check | Kubernetes liveness probe |
+| `/readyz` | Readiness check | Kubernetes readiness probe |
+
+Both endpoints return HTTP 200 when the manager is running normally.
+
+The liveness probe has an initial delay of 15 seconds and checks every 20 seconds. The readiness probe has an initial delay of 5 seconds and checks every 10 seconds. These values come from `config/manager/manager.yaml`.
+
+<Note>
+  The probe endpoints are registered via `mgr.AddHealthzCheck` and `mgr.AddReadyzCheck` in `cmd/main.go`. The `--health-probe-bind-address` flag defaults to `:8081`. In the current source, `HealthProbeBindAddress` is set to `"0"` in `ctrl.Options` (line 84 of `cmd/main.go`), which disables the built-in controller-runtime probe server — the probe HTTP handler registration calls still succeed, but you should verify probe reachability in your deployment if you customise the manager binary.
+</Note>
+
+### Checking health manually
+
+You can query the health endpoints directly from inside the cluster:
+
+```bash
+# Check liveness from inside the operator pod
+kubectl exec -n vector-config-system \
+  deployment/vector-config-controller-manager -- \
+  wget -qO- http://localhost:8081/healthz
+
+# Check readiness
+kubectl exec -n vector-config-system \
+  deployment/vector-config-controller-manager -- \
+  wget -qO- http://localhost:8081/readyz
+```
+
+## Checking operator pod status
+
+```bash
+# Check that the pod is running and ready
+kubectl get pods -n vector-config-system \
+  -l control-plane=controller-manager
+
+# Describe the pod for probe status and recent events
+kubectl describe pod -n vector-config-system \
+  -l control-plane=controller-manager
+```
+
+A healthy pod shows `1/1 Running` with no recent restart count increases.
+
+## Inspecting logs
+
+The operator uses structured (zap) logging. All log lines are written to stdout.
+
+```bash
+# Stream live logs
+kubectl logs -n vector-config-system \
+  deployment/vector-config-controller-manager -f
+
+# Show the last 100 lines
+kubectl logs -n vector-config-system \
+  deployment/vector-config-controller-manager --tail=100
+```
+
+### What healthy startup looks like
+
+On a successful start, you will see these three log lines in order:
+
+```
+{"level":"info","msg":"Current mode is Agent"}
+{"level":"info","msg":"current fileDir is /etc/vector/custom"}
+{"level":"info","msg":"starting manager"}
+```
+
+- **`Current mode is Agent`** — confirms the `--role` flag value the operator is using.
+- **`current fileDir is /etc/vector/custom`** — confirms the directory the operator writes files to. If you passed `--fileDir`, that value appears here instead.
+- **`starting manager`** — the controller-runtime manager started successfully and is watching for Secret events.
+
+<Tip>
+  If the `fileDir` log line shows `/etc/vector/custom` but you expected a different path, the `--fileDir` flag may not be set in your Deployment's `args` field. Check `config/manager/manager.yaml` or the live Deployment spec with `kubectl get deployment vector-config-controller-manager -n vector-config-system -o yaml`.
+</Tip>
+
+## Metrics
+
+The `--metrics-bind-address` flag defaults to `:8082`. However, in the current source `MetricsBindAddress` is hardcoded to `"0"` in `ctrl.Options` (line 83 of `cmd/main.go`), which disables the built-in controller-runtime metrics server regardless of the flag value. Exposing Prometheus metrics requires modifying the manager source to pass the flag value through to `ctrl.Options`.
+
+<Note>
+  If your deployment includes a `config/prometheus/` directory with ServiceMonitor or PodMonitor resources, those resources will not receive metrics until the metrics server is enabled in the manager source.
+</Note>
+
+## Checking Kubernetes events
+
+The operator emits Kubernetes events during reconcile. Check for recent events in the watched namespace:
+
+```bash
+# List all events in the logging namespace, newest first
+kubectl get events -n kubesphere-logging-system \
+  --sort-by='.lastTimestamp'
+
+# Watch events in real time
+kubectl get events -n kubesphere-logging-system -w
+```
+
+Reconcile errors appear as `Warning` events on the Secret object that triggered the reconcile. For example, a file write failure shows up as a Warning on the relevant Secret.
+
+```bash
+# Check events on a specific Secret
+kubectl describe secret agent \
+  --namespace kubesphere-logging-system
+```

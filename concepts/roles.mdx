@@ -1,0 +1,96 @@
+---
+title: "Agent and Aggregator roles in vector-config"
+description: "Understand how vector-config's Agent and Aggregator roles determine which labeled Secrets the operator watches, selects, and writes to disk."
+---
+
+vector-config runs in one of two roles: `Agent` or `Aggregator`. The role controls which Secrets the operator selects during reconciliation — each role only processes Secrets labeled for that specific role. This lets you deploy separate operator instances for per-node log collection (Agent) and cluster-level log aggregation (Aggregator) without those instances interfering with each other's configuration.
+
+## The two roles
+
+**Agent** is intended for per-node deployment, typically as a DaemonSet. An Agent instance manages Vector configuration for a node-local pipeline that collects logs from local sources and forwards them to an Aggregator or external sink.
+
+**Aggregator** is intended for cluster-level deployment, typically as a Deployment. An Aggregator instance manages Vector configuration for a pipeline that receives data from Agent instances and routes it to long-term storage or analytics backends.
+
+Each role operates independently. An Agent operator ignores Secrets labeled `Aggregator`, and an Aggregator operator ignores Secrets labeled `Agent`.
+
+## How the role flag works
+
+You set the role with the `--role` flag when starting the operator manager. The value is stored in `constants.VectorRole` and used as the required value for the `logging.whizard.io/vector-role` label selector during every reconcile run.
+
+```
+--role Agent     # watch only Secrets with logging.whizard.io/vector-role=Agent
+--role Aggregator  # watch only Secrets with logging.whizard.io/vector-role=Aggregator
+```
+
+<Warning>
+  If you pass an unrecognized value to `--role`, the operator silently falls back to `Aggregator`. There is no error or warning logged for invalid role values. Always verify the role by checking the startup log line: `Current mode is <role>`.
+</Warning>
+
+## Setting the role in your Deployment
+
+Pass `--role` as a container argument in the manager Deployment. The example below shows how to configure each role.
+
+<Tabs>
+  <Tab title="Agent">
+    ```yaml
+    apiVersion: apps/v1
+    kind: DaemonSet
+    metadata:
+      name: vector-config-agent
+      namespace: vector-config-system
+    spec:
+      selector:
+        matchLabels:
+          app: vector-config-agent
+      template:
+        metadata:
+          labels:
+            app: vector-config-agent
+        spec:
+          containers:
+            - name: manager
+              image: kubesphere/vector-config:latest
+              args:
+                - --role=Agent
+                - --namespace=kubesphere-logging-system
+                - --fileDir=/etc/vector/custom
+    ```
+  </Tab>
+  <Tab title="Aggregator">
+    ```yaml
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: vector-config-aggregator
+      namespace: vector-config-system
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: vector-config-aggregator
+      template:
+        metadata:
+          labels:
+            app: vector-config-aggregator
+        spec:
+          containers:
+            - name: manager
+              image: kubesphere/vector-config:latest
+              args:
+                - --role=Aggregator
+                - --namespace=kubesphere-logging-system
+                - --fileDir=/etc/vector/custom
+    ```
+  </Tab>
+</Tabs>
+
+## Label matching by role
+
+During reconciliation, the operator builds a label selector that requires both the role label and the enable (or certification) label:
+
+| Role | Config selector | CA selector |
+|---|---|---|
+| `Agent` | `logging.whizard.io/vector-role=Agent` + `logging.whizard.io/enable=true` | `logging.whizard.io/vector-role=Agent` + `logging.whizard.io/certification=true` |
+| `Aggregator` | `logging.whizard.io/vector-role=Aggregator` + `logging.whizard.io/enable=true` | `logging.whizard.io/vector-role=Aggregator` + `logging.whizard.io/certification=true` |
+
+A Secret must carry the correct `vector-role` value for its operator instance, plus the appropriate secondary label, to be written to disk. See [Secret labels](/concepts/secret-labels) for the full label reference.

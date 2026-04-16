@@ -1,0 +1,75 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "vector-config",
+  "projectDescription": "A Kubernetes operator that watches Secrets with specific labels and syncs their data as Vector observability pipeline configuration files to disk.",
+  "theme": "aspen",
+  "primaryColor": "#242b2c",
+  "lightColor": "#6a6a6d",
+  "darkColor": "#ebeaea",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/roles",
+              "concepts/secret-labels"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/prerequisites",
+              "deployment/install",
+              "deployment/configuration",
+              "deployment/uninstall"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/managing-configs",
+              "operations/tls-certificates",
+              "operations/monitoring",
+              "operations/troubleshooting"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Kubernetes Secret-based Vector configuration management",
+    "Dual-role operation: Agent and Aggregator modes",
+    "Automatic config file sync from labeled Secrets to disk",
+    "TLS certificate management via labeled Secrets",
+    "Kubebuilder/controller-runtime operator pattern",
+    "Namespace-scoped watching for multi-tenant isolation",
+    "Leader election support for high availability",
+    "Multi-architecture Docker image (amd64, arm64, s390x, ppc64le)"
+  ],
+  "publicApiSurface": [
+    "SecretReconciler — watches and reconciles v1.Secret resources",
+    "Label: logging.whizard.io/vector-role — designates Secret role (Agent or Aggregator)",
+    "Label: logging.whizard.io/enable=true — enables config reload for a Secret",
+    "Label: logging.whizard.io/certification=true — marks Secret as TLS certificate bundle",
+    "Flag: --role (Agent|Aggregator) — sets the operator's Vector role",
+    "Flag: --namespace — restricts watch to a specific namespace",
+    "Flag: --fileDir — sets output directory for generated config files",
+    "Flag: --leader-elect — enables leader election",
+    "Flag: --metrics-bind-address — metrics endpoint address (default :8082)",
+    "Flag: --health-probe-bind-address — health probe endpoint (default :8081)",
+    "Constant: FilePath=/etc/vector/custom — default config output directory",
+    "Constant: Certification subdir — TLS certificates written here"
+  ]
+}

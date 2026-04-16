@@ -1,0 +1,276 @@
+---
+title: 'Troubleshooting vector-config issues'
+description: 'Diagnose and fix common vector-config operator problems including missing config files, label mistakes, TLS cert issues, and leader election errors.'
+---
+
+This page helps you diagnose problems with the vector-config operator. Each section covers a specific symptom, its likely causes, and the kubectl commands to confirm and resolve it. If you are new to the operator's label system, review [Secret label reference](/concepts/secret-labels) first.
+
+## Common label mistakes
+
+Label errors are the most frequent cause of Secrets not being processed. All label keys and values are case-sensitive.
+
+| Mistake | Correct value | Incorrect examples |
+|---|---|---|
+| Role value casing | `Agent` or `Aggregator` | `agent`, `AGENT`, `aggregator` |
+| Enable value type | `"true"` (string) | `true` (unquoted), `True`, `1` |
+| Certification value type | `"true"` (string) | `true` (unquoted), `True`, `1` |
+| Label key typo | `logging.whizard.io/vector-role` | `logging.whizard.io/vectorrole`, `logging.whizard.io/vector_role` |
+
+Check the labels on a Secret with:
+
+```bash
+kubectl get secret <secret-name> \
+  --namespace kubesphere-logging-system \
+  --show-labels
+```
+
+---
+
+## Common issues
+
+<AccordionGroup>
+
+  <Accordion title="Config files not appearing on disk">
+    The operator reconciled but the expected files are missing from `FileDir`.
+
+    **Likely causes:**
+
+    - The Secret labels do not match what the operator expects.
+    - The Secret is in a namespace the operator is not watching.
+    - The operator's `--role` flag does not match the Secret's `logging.whizard.io/vector-role` value.
+
+    **Diagnostic steps:**
+
+    ```bash
+    # 1. Confirm the Secret exists and check its labels
+    kubectl get secret <secret-name> \
+      --namespace kubesphere-logging-system \
+      --show-labels
+
+    # 2. Check the operator's role and fileDir from its logs
+    kubectl logs -n vector-config-system \
+      deployment/vector-config-controller-manager \
+      --tail=20
+
+    # 3. Check the operator's --role and --namespace flags
+    kubectl get deployment vector-config-controller-manager \
+      --namespace vector-config-system \
+      -o jsonpath='{.spec.template.spec.containers[0].args}'
+
+    # 4. List all Secrets with the enable label in the watched namespace
+    kubectl get secrets \
+      --namespace kubesphere-logging-system \
+      -l 'logging.whizard.io/enable=true'
+    ```
+
+    **Fix:** Correct the Secret's labels so that `logging.whizard.io/vector-role` exactly matches the operator's `--role` value (case-sensitive), and `logging.whizard.io/enable` is the string `"true"`. The operator reconciles automatically on the label change.
+
+    <Warning>
+      The operator watches only the namespace set by its `--namespace` flag (default `kubesphere-logging-system`). Secrets in other namespaces are ignored even if they carry the correct labels.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="Operator pod not starting">
+    The controller-manager pod is in `Pending`, `CrashLoopBackOff`, or `Error` state.
+
+    **Likely causes:**
+
+    - RBAC permissions are missing — the controller's ServiceAccount does not have `get`, `list`, `watch` on Secrets.
+    - The container image cannot be pulled.
+    - The kubeconfig context is pointed at the wrong cluster.
+
+    **Diagnostic steps:**
+
+    ```bash
+    # 1. Check pod status and recent events
+    kubectl describe pod \
+      --namespace vector-config-system \
+      -l control-plane=controller-manager
+
+    # 2. Check for RBAC errors in the logs
+    kubectl logs -n vector-config-system \
+      deployment/vector-config-controller-manager
+
+    # 3. Verify the ServiceAccount and ClusterRoleBinding exist
+    kubectl get serviceaccount vector-config-controller-manager \
+      --namespace vector-config-system
+
+    kubectl get clusterrolebinding \
+      -l app.kubernetes.io/part-of=vector-config
+
+    # 4. Check image pull status
+    kubectl get events \
+      --namespace vector-config-system \
+      --field-selector reason=Failed
+    ```
+
+    **Fix:** If the issue is RBAC, re-apply the RBAC manifests with `make deploy` or apply the manifests in `config/rbac/` directly. If the image cannot be pulled, verify the image tag and registry credentials.
+  </Accordion>
+
+  <Accordion title="Files appear but Vector ignores them">
+    The operator is writing files to disk but Vector does not load the configuration.
+
+    **Likely causes:**
+
+    - Vector's `--config-dir` flag does not point to the same directory as the operator's `--fileDir`.
+    - Vector was started before the operator wrote the files and has not reloaded.
+    - The file content is invalid Vector YAML.
+
+    **Diagnostic steps:**
+
+    ```bash
+    # 1. Confirm the files exist and check their content
+    kubectl exec -n kubesphere-logging-system \
+      <vector-pod-name> -- ls /etc/vector/custom/
+
+    kubectl exec -n kubesphere-logging-system \
+      <vector-pod-name> -- cat /etc/vector/custom/<filename>
+
+    # 2. Check what config directory Vector is using
+    kubectl get pod <vector-pod-name> \
+      --namespace kubesphere-logging-system \
+      -o jsonpath='{.spec.containers[0].args}'
+
+    # 3. Check Vector logs for config parse errors
+    kubectl logs <vector-pod-name> \
+      --namespace kubesphere-logging-system
+    ```
+
+    **Fix:** Ensure Vector's `--config-dir` argument matches the operator's `--fileDir` value. If the content is invalid, fix the Vector YAML in the Secret's data field and re-apply.
+
+    <Note>
+      The operator's default `--fileDir` is `/etc/vector/custom`. Vector must be configured with `--config-dir /etc/vector/custom` (or the same path you passed to `--fileDir`) to pick up these files.
+    </Note>
+  </Accordion>
+
+  <Accordion title="Old config files persist after label removal or Secret deletion">
+    Files that should have been removed are still present on disk.
+
+    **How the operator works:** `removeAllFiles()` runs at the start of every reconcile, deleting every non-directory file under `FileDir`. Files then rewritten from the currently-labelled Secrets. If old files are still present, a reconcile has not completed successfully since you made the change.
+
+    **Likely causes:**
+
+    - The operator pod is not running.
+    - The operator pod is running but encountered an error during the last reconcile (check logs).
+    - No reconcile-triggering event has occurred since the change.
+
+    **Diagnostic steps:**
+
+    ```bash
+    # 1. Check operator pod is running
+    kubectl get pods -n vector-config-system \
+      -l control-plane=controller-manager
+
+    # 2. Check for reconcile errors in logs
+    kubectl logs -n vector-config-system \
+      deployment/vector-config-controller-manager \
+      --tail=50
+
+    # 3. Trigger a reconcile by touching any watched Secret
+    kubectl annotate secret <any-secret-name> \
+      --namespace kubesphere-logging-system \
+      vector-config/reconcile-trigger="$(date +%s)" \
+      --overwrite
+    ```
+
+    **Fix:** Restart the operator pod to force a fresh reconcile:
+
+    ```bash
+    kubectl rollout restart deployment/vector-config-controller-manager \
+      --namespace vector-config-system
+    ```
+  </Accordion>
+
+  <Accordion title="TLS cert files not appearing in certification/">
+    The `certification/` directory exists but does not contain the expected cert files.
+
+    **Likely causes:**
+
+    - The Secret is labelled with `logging.whizard.io/enable: "true"` instead of `logging.whizard.io/certification: "true"`.
+    - The Secret is missing the `logging.whizard.io/vector-role` label (both labels are required for cert sync).
+    - The role value does not match the operator's `--role` flag.
+
+    **Diagnostic steps:**
+
+    ```bash
+    # 1. Check the cert Secret's labels
+    kubectl get secret <cert-secret-name> \
+      --namespace kubesphere-logging-system \
+      --show-labels
+
+    # 2. List all Secrets with the certification label
+    kubectl get secrets \
+      --namespace kubesphere-logging-system \
+      -l 'logging.whizard.io/certification=true'
+
+    # 3. Verify both required labels are present
+    kubectl get secret <cert-secret-name> \
+      --namespace kubesphere-logging-system \
+      -o jsonpath='{.metadata.labels}'
+    ```
+
+    **Fix:** Ensure the Secret has both `logging.whizard.io/vector-role=<role>` and `logging.whizard.io/certification: "true"`. Do not use `logging.whizard.io/enable: "true"` on a cert Secret — that label triggers config sync, not cert sync.
+
+    <Warning>
+      If a cert Secret has the same data key name as another cert Secret for the same role, the later-processed Secret will silently overwrite the earlier one's file. Use unique data key names across all cert Secrets for a given role.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="Leader election issues">
+    Multiple operator pods are running but only one should be active, or the operator logs show lease acquisition failures.
+
+    **How leader election works:** When `--leader-elect` is passed, the operator uses a Kubernetes Lease resource with ID `66c47c3e.kubesphere.io` to ensure only one replica is the active leader. Non-leader replicas wait until the current leader releases the lease.
+
+    **Likely causes:**
+
+    - The controller's ServiceAccount lacks permission to create or update `coordination.k8s.io/leases`.
+    - A previous operator instance did not release its lease before terminating.
+    - Leader election is not enabled but multiple replicas are deployed.
+
+    **Diagnostic steps:**
+
+    ```bash
+    # 1. Check the lease object
+    kubectl get lease 66c47c3e.kubesphere.io \
+      --namespace kubesphere-logging-system
+
+    # 2. Check for lease-related errors in logs
+    kubectl logs -n kubesphere-logging-system \
+      deployment/vector-config-controller-manager \
+      --tail=50 | grep -i leader
+
+    # 3. Check RBAC for lease permissions
+    kubectl auth can-i create leases \
+      --namespace kubesphere-logging-system \
+      --as system:serviceaccount:kubesphere-logging-system:controller-manager
+    ```
+
+    **Fix:** If the lease is stale, delete it to force a new election:
+
+    ```bash
+    # 2. Check for lease-related errors in logs
+    kubectl logs -n vector-config-system \
+      deployment/vector-config-controller-manager \
+      --tail=50 | grep -i leader
+
+    # 3. Check RBAC for lease permissions
+    kubectl auth can-i create leases \
+      --namespace vector-config-system \
+      --as system:serviceaccount:vector-config-system:vector-config-controller-manager
+    ```
+
+    **Fix:** If the lease is stale, delete it to force a new election:
+
+    ```bash
+    kubectl delete lease 66c47c3e.kubesphere.io \
+      --namespace vector-config-system
+    ```
+
+    If you are running a single replica and do not need high availability, remove the `--leader-elect` flag from the Deployment's `args` to avoid lease overhead.
+
+    <Note>
+      Leader election is disabled by default (`--leader-elect` defaults to `false`). Enable it only when you run more than one replica of the controller manager.
+    </Note>
+  </Accordion>
+
+</AccordionGroup>

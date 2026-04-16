@@ -1,0 +1,95 @@
+---
+title: "How vector-config reconciles and writes config files"
+description: "Learn how the vector-config operator uses a controller-runtime reconcile loop to detect Secret changes and write Vector configuration files to disk."
+---
+
+vector-config is a Kubernetes operator built on [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime). It watches `Secret` resources in a single namespace and, whenever a watched Secret changes, runs a reconcile loop that rewrites all matching configuration files to a local directory. This page explains the operator pattern, how the reconcile loop works step by step, and the file layout it produces.
+
+## Operator pattern
+
+vector-config follows the standard Kubernetes controller pattern: a `SecretReconciler` registers with the controller-runtime manager and receives a reconcile request whenever a `Secret` event fires in the watched namespace. The operator does not use custom resource definitions (CRDs) — it drives entirely from labels on standard Kubernetes `Secret` objects.
+
+The manager restricts its cache to a single namespace (default: `kubesphere-logging-system`) so the operator never sees Secrets from other namespaces.
+
+## Reconcile loop
+
+Each reconcile run performs a full-replace of all config files. The loop does not diff individual Secrets — it clears all existing files and rewrites from scratch on every event. This keeps the on-disk state strictly consistent with the current set of labeled Secrets, at the cost of a brief window where files are absent.
+
+<Steps>
+  <Step title="Build label selectors">
+    The reconciler constructs two label selectors based on the operator's configured role (see [Roles](/concepts/roles)):
+
+    - **Config selector**: `logging.whizard.io/vector-role=<role>` AND `logging.whizard.io/enable=true`
+    - **CA selector**: `logging.whizard.io/vector-role=<role>` AND `logging.whizard.io/certification=true`
+
+    Only Secrets matching one of these selectors are written to disk.
+  </Step>
+  <Step title="Remove all existing files">
+    The reconciler calls `removeAllFiles()`, which walks `FileDir` and deletes every non-directory file. Directory entries are preserved. This ensures no stale config from a deleted or relabeled Secret lingers on disk.
+  </Step>
+  <Step title="Recreate the output directories">
+    The reconciler calls `os.MkdirAll` to recreate:
+
+    - `<FileDir>/` — root config directory (default: `/etc/vector/custom`)
+    - `<FileDir>/certification/` — subdirectory for TLS certificates
+  </Step>
+  <Step title="Write config files">
+    The reconciler lists all Secrets matching the config selector and iterates over each Secret's data entries. For every key–value pair in `secret.Data`, it writes a file at:
+
+    ```
+    <FileDir>/<secret-name>-<data-key>
+    ```
+
+    Files are written with permission `0644`.
+  </Step>
+  <Step title="Write certificate files">
+    The reconciler lists all Secrets matching the CA selector and iterates over each Secret's data entries. For every key–value pair in `secret.Data`, it writes a file at:
+
+    ```
+    <FileDir>/certification/<data-key>
+    ```
+
+    Files are written with permission `0644`. Note that the Secret name is **not** included in the path — only the data key is used as the filename.
+  </Step>
+</Steps>
+
+## Watch scope
+
+The operator's cache is namespace-scoped. You set the watched namespace with the `--namespace` flag at startup. The reconciler uses `req.Namespace` when listing Secrets, so it never queries outside that namespace.
+
+Within the namespace, the operator watches **all** `Secret` resources. The label filtering happens inside the reconcile function, not at the watch level — a change to any Secret in the namespace triggers a reconcile run, even if that Secret carries no vector-config labels.
+
+## File layout
+
+After a reconcile run, the output directory has this structure:
+
+```
+<FileDir>/
+├── <secret-name>-<data-key>      # one file per data entry in each config Secret
+├── <secret-name>-<data-key>      # ...
+└── certification/
+    ├── <data-key>                # one file per data entry in each CA Secret
+    └── <data-key>                # ...
+```
+
+For example, a Secret named `agent` with a data key `agent.yaml` produces the file `<FileDir>/agent-agent.yaml`. A CA Secret with a data key `ca.crt` produces `<FileDir>/certification/ca.crt`.
+
+## Default file directory
+
+If you start the operator without `--fileDir`, `FileDir` defaults to `/etc/vector/custom`. You can override this with the `--fileDir` flag.
+
+```bash
+--fileDir /path/to/your/config/dir
+```
+
+## RBAC requirements
+
+The operator requires the following permissions on `Secret` resources in the watched namespace:
+
+| Resource | Verbs |
+|---|---|
+| `secrets` | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
+| `secrets/status` | `get`, `update`, `patch` |
+| `secrets/finalizers` | `update` |
+
+These are generated from the `//+kubebuilder:rbac` markers in `secret_controller.go` and rendered into the `config/rbac/` manifests by controller-gen.

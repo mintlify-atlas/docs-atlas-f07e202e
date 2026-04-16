@@ -1,0 +1,200 @@
+---
+title: 'Managing Vector configs with Kubernetes Secrets'
+description: 'Learn how to create, update, and delete Vector pipeline configurations by labelling Kubernetes Secrets that vector-config automatically syncs to disk.'
+---
+
+The vector-config operator manages Vector configuration files by watching Kubernetes Secrets in a single namespace. When you label a Secret correctly, the operator writes the Secret's data keys as individual files under its configuration directory. This page shows you how to create, update, and delete Vector configs through that mechanism, and explains the full-replace reconcile semantics that keep the disk state consistent.
+
+## How reconcile works
+
+On every reconcile, the operator:
+
+1. Removes every non-directory file under `FileDir` (default `/etc/vector/custom`).
+2. Lists all Secrets in the watched namespace that match both `logging.whizard.io/vector-role=<role>` and `logging.whizard.io/enable=true`.
+3. Writes each data key from each matching Secret as a file named `<secret-name>-<data-key>` under `FileDir`.
+
+The full-replace semantics mean the on-disk state always exactly mirrors the set of currently-labelled Secrets. Any Secret event in the watched namespace triggers a reconcile.
+
+<Note>
+  Because files are removed and rewritten on every reconcile, adding a Secret, updating one, or removing a label all produce the same complete rebuild. There is no partial update.
+</Note>
+
+## Creating a config Secret
+
+<Steps>
+  <Step title="Write your Vector config YAML">
+    Create a valid Vector pipeline configuration file. For example, a minimal file-to-stdout pipeline:
+
+    ```yaml vector-pipeline.yaml
+    data_dir: /var/lib/vector
+
+    sources:
+      app_logs:
+        type: file
+        include:
+          - /var/log/app/*.log
+
+    sinks:
+      out:
+        type: console
+        inputs:
+          - app_logs
+        encoding:
+          codec: json
+    ```
+  </Step>
+
+  <Step title="Create the Secret with the required labels">
+    The Secret must carry `logging.whizard.io/vector-role` matching the operator's `--role` flag, and `logging.whizard.io/enable: "true"` to be included in the config sync.
+
+    <CodeGroup>
+
+    ```bash kubectl create (recommended)
+    kubectl create secret generic agent-pipeline \
+      --namespace kubesphere-logging-system \
+      --from-file=pipeline.yaml=vector-pipeline.yaml
+    kubectl label secret agent-pipeline \
+      --namespace kubesphere-logging-system \
+      logging.whizard.io/vector-role=Agent \
+      'logging.whizard.io/enable=true'
+    ```
+
+    ```yaml kubectl apply
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: agent-pipeline
+      namespace: kubesphere-logging-system
+      labels:
+        logging.whizard.io/vector-role: Agent
+        logging.whizard.io/enable: "true"
+    type: Opaque
+    data:
+      pipeline.yaml: <base64-encoded Vector config>
+    ```
+
+    </CodeGroup>
+
+    Save the YAML version as `agent-pipeline-secret.yaml` and apply it with:
+
+    ```bash
+    kubectl apply -f agent-pipeline-secret.yaml
+    ```
+  </Step>
+
+  <Step title="Verify the file was written">
+    After the operator reconciles, confirm the file exists on the node or inside the Vector pod that mounts `FileDir`:
+
+    ```bash
+    # From inside the Vector pod
+    ls /etc/vector/custom/
+    # Expected output includes: agent-pipeline-pipeline.yaml
+    ```
+
+    The file name follows the pattern `<secret-name>-<data-key>`: the Secret named `agent-pipeline` with data key `pipeline.yaml` produces `agent-pipeline-pipeline.yaml`.
+  </Step>
+</Steps>
+
+## Complete Secret example
+
+This example reflects the structure from `config/sample/secret2.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agent
+  namespace: kubesphere-logging-system
+  labels:
+    logging.whizard.io/vector-role: Agent
+    logging.whizard.io/enable: "true"
+type: Opaque
+data:
+  agent.yaml: <base64-encoded Vector config>
+```
+
+The data key `agent.yaml` in a Secret named `agent` produces this file on disk:
+
+```
+/etc/vector/custom/agent-agent.yaml
+```
+
+## Using multiple Secrets
+
+You can distribute your Vector configuration across multiple Secrets. Each Secret produces its own set of files — they do not conflict as long as the file names are distinct.
+
+```yaml
+# Secret 1: sources
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agent-sources
+  namespace: kubesphere-logging-system
+  labels:
+    logging.whizard.io/vector-role: Agent
+    logging.whizard.io/enable: "true"
+type: Opaque
+data:
+  sources.yaml: <base64-encoded config>
+---
+# Secret 2: sinks
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agent-sinks
+  namespace: kubesphere-logging-system
+  labels:
+    logging.whizard.io/vector-role: Agent
+    logging.whizard.io/enable: "true"
+type: Opaque
+data:
+  sinks.yaml: <base64-encoded config>
+```
+
+These produce two separate files:
+
+```
+/etc/vector/custom/agent-sources-sources.yaml
+/etc/vector/custom/agent-sinks-sinks.yaml
+```
+
+<Note>
+  File names are derived from both the Secret name and the data key. Two Secrets with the same name and the same data key would produce the same file path, but Kubernetes enforces unique Secret names within a namespace, so collisions only occur if a single Secret has two data keys that would resolve identically — which cannot happen.
+</Note>
+
+## Updating a config
+
+Edit the Secret's data field and apply the change. The operator reconciles automatically when Kubernetes notifies it of the Secret update.
+
+```bash
+# Edit in place
+kubectl edit secret agent-pipeline --namespace kubesphere-logging-system
+
+# Or apply an updated manifest
+kubectl apply -f agent-pipeline-secret.yaml
+```
+
+The operator removes all files from `FileDir`, then rewrites every file from all currently-labelled Secrets. Your updated config is included in the new write.
+
+## Deleting a config
+
+You have two options:
+
+**Option 1: Remove the `logging.whizard.io/enable` label.** The operator reconciles on the label-change event. Because it removes all files and rewrites only the currently-labelled Secrets, the files from this Secret are not rewritten.
+
+```bash
+kubectl label secret agent-pipeline \
+  --namespace kubesphere-logging-system \
+  logging.whizard.io/enable-
+```
+
+**Option 2: Delete the Secret entirely.** The Secret deletion triggers a reconcile and the files are not rewritten.
+
+```bash
+kubectl delete secret agent-pipeline \
+  --namespace kubesphere-logging-system
+```
+
+<Warning>
+  If the operator pod is not running when you remove the label or delete the Secret, the previously written files remain on disk until the next reconcile. Restart the operator pod or trigger a reconcile by updating any watched Secret to force a cleanup.
+</Warning>

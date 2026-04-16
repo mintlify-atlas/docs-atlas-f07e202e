@@ -1,0 +1,87 @@
+---
+title: 'What you need before installing vector-config'
+description: 'Verify the CLI tools, Kubernetes cluster access, and RBAC permissions you need before installing the vector-config operator.'
+---
+
+Before you install vector-config, confirm that you have the required CLI tools installed, a Kubernetes cluster with the right RBAC permissions, and — if you plan to build the image yourself — a container runtime and a Go toolchain. This page walks you through each requirement and shows you how to verify it.
+
+## Required tools
+
+<Steps>
+  <Step title="kubectl">
+    You need `kubectl` configured to talk to your target cluster. The `install` and `deploy` make targets both use the cluster pointed to by `~/.kube/config`.
+
+    ```bash
+    kubectl version --client
+    ```
+
+    You should see a version line printed without errors.
+  </Step>
+
+  <Step title="kustomize v5.0.1 or later">
+    The Makefile downloads kustomize v5.0.1 automatically into `./bin/` when you run any deployment target. If you prefer a system-wide install, verify the version:
+
+    ```bash
+    kustomize version
+    ```
+
+    The output should include `v5.0.1` or a later `v5.x` release. Earlier versions are not compatible with the overlay structure used by this project.
+  </Step>
+
+  <Step title="Docker or Podman (image builds only)">
+    You need a container runtime with `buildx` support to build and push the multi-architecture image. The Makefile defaults to `docker`; set `CONTAINER_TOOL=podman` to use Podman instead.
+
+    ```bash
+    docker buildx version
+    ```
+
+    Skip this step if you are deploying a pre-built image from a registry.
+  </Step>
+
+  <Step title="A Kubernetes cluster (1.27+ recommended)">
+    The project is tested against Kubernetes 1.27.1 (the envtest version pinned in the Makefile). Earlier versions may work but are not validated.
+
+    ```bash
+    kubectl get nodes
+    ```
+
+    All nodes should show `Ready` status before you proceed.
+  </Step>
+
+  <Step title="Go 1.20+ (local development only)">
+    You only need Go if you want to build the manager binary locally or run the test suite. The Docker image is built with Go 1.20 inside the builder stage.
+
+    ```bash
+    go version
+    ```
+
+    The output should show `go1.20` or later. You can skip this step if you only deploy from a pre-built image.
+  </Step>
+</Steps>
+
+## Cluster access requirements
+
+The `make deploy` target applies manifests that create cluster-scoped and namespaced resources. Your `kubectl` context must have permission to:
+
+| Resource | Scope | Required action |
+|---|---|---|
+| `Deployment` | Namespace | `create`, `patch`, `delete` |
+| `ServiceAccount` | Namespace | `create`, `patch`, `delete` |
+| `ClusterRole` / `ClusterRoleBinding` | Cluster | `create`, `patch`, `delete` |
+| `Namespace` | Cluster | `create` |
+
+The `make deploy` target creates the `vector-config-system` namespace for the controller itself (set by `config/default/kustomization.yaml`). The controller then watches Secrets in the `kubesphere-logging-system` namespace by default (the `--namespace` flag).
+
+<Note>
+  If your organization uses GitOps or a restricted CI environment, generate the manifests offline with `kustomize build config/default` and apply them through your approved pipeline.
+</Note>
+
+### Verify your permissions
+
+```bash
+kubectl auth can-i create deployments -n vector-config-system
+kubectl auth can-i create serviceaccounts -n vector-config-system
+kubectl auth can-i create clusterroles
+```
+
+Each command should return `yes`. If any returns `no`, ask your cluster administrator to grant the missing permissions before continuing.

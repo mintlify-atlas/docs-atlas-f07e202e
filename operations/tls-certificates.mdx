@@ -1,0 +1,160 @@
+---
+title: 'Managing TLS certificates for Vector with vector-config'
+description: 'Supply TLS certificates to Vector by creating Kubernetes Secrets with the certification label that vector-config syncs to a dedicated directory.'
+---
+
+The vector-config operator provides a dedicated certificate sync path separate from general configuration files. When you label a Kubernetes Secret with `logging.whizard.io/certification: "true"`, the operator writes every data key from that Secret as a file under the `certification/` subdirectory of its file directory. This page shows you how to create cert Secrets, explains the resulting file paths, and shows how Vector references those paths in its configuration.
+
+## How cert sync differs from config sync
+
+Config Secrets (labelled `logging.whizard.io/enable: "true"`) produce files named `<secret-name>-<data-key>` directly under `FileDir`. Cert Secrets produce files named only `<data-key>` under `<FileDir>/certification/` — the Secret name is not included in the output path.
+
+| Label | Output path pattern |
+|---|---|
+| `logging.whizard.io/enable: "true"` | `<FileDir>/<secret-name>-<data-key>` |
+| `logging.whizard.io/certification: "true"` | `<FileDir>/certification/<data-key>` |
+
+Both directories are recreated from scratch on every reconcile.
+
+<Warning>
+  Because cert file names come from the data key alone, two cert Secrets with the same data key name will overwrite each other's output file. For example, if two Secrets both contain a key named `ca.crt`, the second one processed will silently overwrite the first. Use unique data key names across all cert Secrets for the same role.
+</Warning>
+
+## Required labels
+
+A cert Secret requires both labels:
+
+- `logging.whizard.io/vector-role`: must match the operator's `--role` flag (`Agent` or `Aggregator`)
+- `logging.whizard.io/certification: "true"`: marks this Secret for cert sync
+
+<Note>
+  Do not add `logging.whizard.io/enable: "true"` to a cert Secret. The operator uses separate selectors for config and cert Secrets — adding both labels will cause the Secret to be processed by both selectors, writing the data keys as both config files (with the `<secret-name>-` prefix) and cert files (without the prefix).
+</Note>
+
+## Creating a cert Secret
+
+<Steps>
+  <Step title="Gather your certificate files">
+    Prepare the certificate and key files you want Vector to use. A typical mTLS setup needs a CA certificate, a TLS certificate, and a private key:
+
+    ```
+    ca.crt    — Certificate Authority certificate
+    tls.crt   — TLS certificate
+    tls.key   — TLS private key
+    ```
+  </Step>
+
+  <Step title="Create the Secret">
+    <CodeGroup>
+
+    ```bash kubectl create (recommended)
+    kubectl create secret generic vector-tls \
+      --namespace kubesphere-logging-system \
+      --from-file=ca.crt=ca.crt \
+      --from-file=tls.crt=tls.crt \
+      --from-file=tls.key=tls.key
+    kubectl label secret vector-tls \
+      --namespace kubesphere-logging-system \
+      logging.whizard.io/vector-role=Agent \
+      'logging.whizard.io/certification=true'
+    ```
+
+    ```yaml kubectl apply
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: vector-tls
+      namespace: kubesphere-logging-system
+      labels:
+        logging.whizard.io/vector-role: Agent
+        logging.whizard.io/certification: "true"
+    type: Opaque
+    data:
+      ca.crt: <base64-encoded CA certificate>
+      tls.crt: <base64-encoded TLS certificate>
+      tls.key: <base64-encoded TLS private key>
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Verify the cert files on disk">
+    After reconcile, confirm the files are present:
+
+    ```bash
+    # From inside the Vector pod
+    ls /etc/vector/custom/certification/
+    # Expected: ca.crt  tls.crt  tls.key
+    ```
+  </Step>
+</Steps>
+
+## Resulting file paths
+
+With the default `--fileDir` of `/etc/vector/custom`, the Secret above produces:
+
+```
+/etc/vector/custom/certification/ca.crt
+/etc/vector/custom/certification/tls.crt
+/etc/vector/custom/certification/tls.key
+```
+
+All cert files are written with mode `0644`. The `certification/` directory is created with mode `0755`.
+
+If you override `--fileDir`, the cert path changes accordingly:
+
+```
+<your-fileDir>/certification/ca.crt
+<your-fileDir>/certification/tls.crt
+<your-fileDir>/certification/tls.key
+```
+
+## Referencing cert files in Vector config
+
+Point Vector's TLS configuration to the paths written by the operator. For a sink that sends logs over TLS:
+
+```yaml
+sinks:
+  loki:
+    type: loki
+    inputs:
+      - app_logs
+    endpoint: https://loki.example.com
+    tls:
+      ca_file: /etc/vector/custom/certification/ca.crt
+      crt_file: /etc/vector/custom/certification/tls.crt
+      key_file: /etc/vector/custom/certification/tls.key
+```
+
+For a source that accepts mTLS connections:
+
+```yaml
+sources:
+  vector_in:
+    type: vector
+    address: 0.0.0.0:6000
+    tls:
+      enabled: true
+      ca_file: /etc/vector/custom/certification/ca.crt
+      crt_file: /etc/vector/custom/certification/tls.crt
+      key_file: /etc/vector/custom/certification/tls.key
+```
+
+Store this Vector config in a config Secret (labelled `logging.whizard.io/enable: "true"`) so the operator writes it alongside the cert files.
+
+## Rotating certificates
+
+To rotate certificates, update the cert Secret's data field with new certificate content. The operator reconciles on the update event and rewrites the cert files with the new values.
+
+```bash
+kubectl create secret generic vector-tls \
+  --namespace kubesphere-logging-system \
+  --from-file=ca.crt=new-ca.crt \
+  --from-file=tls.crt=new-tls.crt \
+  --from-file=tls.key=new-tls.key \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+<Note>
+  The operator writes the new cert files to disk, but Vector does not automatically reload its TLS context when files change. Check Vector's documentation for your version to determine whether a process reload or restart is needed after rotating certificates.
+</Note>
